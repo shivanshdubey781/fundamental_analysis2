@@ -1,0 +1,31 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Local databases and data
+data/tracker.db
+data/first_seen.json
+data/*.db
+data/*.json
+
+# Logs
+logs/
+*.log
+
+# Reports
+reports/
+
+# Scratch & Temporary files
+scratch/
+screener2.zip
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
