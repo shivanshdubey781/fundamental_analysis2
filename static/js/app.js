@@ -1773,11 +1773,11 @@ function renderSignalSummary(results) {
           return;
         }
 
-        // Market open — show live LTP with change vs close
-        const diff    = close != null ? (ltp - close) : null;
+        // Market open — show live LTP with change since previous scan today
+        const diff    = r.ltp_change_since_scan;
         const diffStr = diff != null
-          ? ` <span style="font-size:9px;color:${diff>=0?'var(--accent)':'var(--red)'};margin-left:3px">${diff>=0?'+':''}${diff.toFixed(2)}</span>`
-          : '';
+          ? ` <span style="font-size:9px;color:${diff>=0?'var(--accent)':'var(--red)'};margin-left:3px">${diff>=0?'+':''}${Number(diff).toFixed(2)}</span>`
+          : ` <span style="font-size:9px;color:var(--text3);margin-left:3px">—</span>`;
         cell.innerHTML = `<span style="color:var(--accent);font-weight:600">\u20b9${Number(ltp).toFixed(2)}</span>${diffStr}`;
       });
     })
@@ -1913,9 +1913,9 @@ function _checkAndNotify(results) {
           if (!el) return;
           const ltp = ltpMap[r.ticker];
           if (ltp == null) { el.textContent = 'LTP: N/A'; return; }
-          const diff = r.close != null ? (ltp - Number(r.close)) : null;
+          const diff = r.ltp_change_since_scan;
           const sign = diff != null ? (diff >= 0 ? '+' : '') : '';
-          const diffStr = diff != null ? ` (${sign}${diff.toFixed(2)})` : '';
+          const diffStr = diff != null ? ` (${sign}${Number(diff).toFixed(2)})` : ' (—)';
           el.innerHTML = `LTP: <span style="color:${diff!=null&&diff>=0?'var(--accent)':'var(--red)'};">\u20b9${Number(ltp).toFixed(2)}${diffStr}</span>`;
         });
       })

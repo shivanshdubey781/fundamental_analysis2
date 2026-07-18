@@ -187,7 +187,7 @@ class TestTrackerModeExports(unittest.TestCase):
             self.assertIn("HIGH2", tickers)
             self.assertNotIn("LOW", tickers)
             
-            expected_cols = ["ticker", "since", "score", "grd", "signal", "close", "ltp", "stop", "rsi", "atr", "filter"]
+            expected_cols = ["ticker", "since", "score", "grd", "signal", "close", "ltp", "ltp_change_since_scan", "stop", "rsi", "atr", "filter"]
             self.assertListEqual(list(res_df.columns), expected_cols)
             
             h1 = res_df[res_df["ticker"] == "HIGH1"].iloc[0]

@@ -25,6 +25,13 @@ def get_conn():
     finally:
         conn.close()
 
+def _migrate_add_column(conn, table: str, column: str, coltype: str) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        conn.commit()
+        log.info("[migration] Added column %s.%s", table, column)
+
 def init_db() -> None:
     """Initializes the database schema and indices."""
     with get_conn() as conn:
@@ -70,6 +77,15 @@ def init_db() -> None:
         """)
         
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS scan_ltp_history (
+            ticker      TEXT PRIMARY KEY,
+            ltp         REAL,
+            scan_date   TEXT,
+            updated_at  TEXT
+        );
+        """)
+        
+        conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_screen_entries_ticker_status
         ON screen_entries (ticker, status);
         """)
@@ -79,16 +95,10 @@ def init_db() -> None:
         ON screen_snapshots (entry_id);
         """)
 
-        # Lightweight migration for older local DBs created before gated-entry support.
-        cols = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(screen_entries)").fetchall()
-        }
-        if "gated_entry" not in cols:
-            conn.execute(
-                "ALTER TABLE screen_entries ADD COLUMN gated_entry INTEGER NOT NULL DEFAULT 0"
-            )
-
+        # Add additive columns safely via our helper
+        _migrate_add_column(conn, "screen_entries", "gated_entry", "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "screen_entries", "sl_breach_count", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "screen_entries", "sl_breach_since", "TEXT")
 
         # Create telegram_events table to suppress duplicate alerts
         conn.execute("""
@@ -102,7 +112,6 @@ def init_db() -> None:
         );
         """)
 
-        
         conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_telegram_events_key ON telegram_events (event_key);
         """)
@@ -208,24 +217,61 @@ def update_entry_state(
     entry_id: int,
     last_price: float,
     last_seen_at: str,
-    highest_price: float,
-    current_trail_sl: float,
-    report_name: str,
+    highest_price: float | None = None,
+    current_trail_sl: float | None = None,
+    report_name: str = "ltp_refresh",
+    sl_breach_count: int | None = None,
+    sl_breach_since: str | None = None,
 ) -> None:
-    """Updates the runtime state metrics of an active tracker entry."""
+    """Updates the runtime state metrics of an active tracker entry, optionally including breach metadata."""
+    set_clauses = ["last_price = ?", "last_seen_at = ?", "last_report_name = ?"]
+    params = [last_price, last_seen_at, report_name]
+
+    if highest_price is not None:
+        set_clauses.append("highest_price = ?")
+        params.append(highest_price)
+    if current_trail_sl is not None:
+        set_clauses.append("current_trail_sl = ?")
+        params.append(current_trail_sl)
+    if sl_breach_count is not None:
+        set_clauses.append("sl_breach_count = ?")
+        params.append(sl_breach_count)
+        set_clauses.append("sl_breach_since = ?")
+        params.append(sl_breach_since)
+
+    params.append(entry_id)
+    query = f"UPDATE screen_entries SET {', '.join(set_clauses)} WHERE id = ?"
+    
+    with get_conn() as conn:
+        conn.execute(query, tuple(params))
+
+def get_prev_scan_ltp(ticker: str, today: str) -> float | None:
+    """Retrieves the last scanned LTP for a ticker on a specific date."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT ltp FROM scan_ltp_history WHERE ticker = ? AND scan_date = ?",
+            (ticker.strip().upper(), today)
+        ).fetchone()
+        return row["ltp"] if row else None
+
+def upsert_scan_ltp(ticker: str, ltp: float, today: str) -> None:
+    """Saves or updates the last scanned LTP for a ticker on a specific date."""
+    import pytz
+    from datetime import datetime
+    ist = pytz.timezone("Asia/Kolkata")
     with get_conn() as conn:
         conn.execute(
             """
-            UPDATE screen_entries
-            SET last_price = ?,
-                last_seen_at = ?,
-                highest_price = ?,
-                current_trail_sl = ?,
-                last_report_name = ?
-            WHERE id = ?
+            INSERT INTO scan_ltp_history (ticker, ltp, scan_date, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                ltp = excluded.ltp,
+                scan_date = excluded.scan_date,
+                updated_at = excluded.updated_at
             """,
-            (last_price, last_seen_at, highest_price, current_trail_sl, report_name, entry_id)
+            (ticker.strip().upper(), ltp, today, datetime.now(ist).isoformat())
         )
+
 
 def close_entry(
     entry_id: int,

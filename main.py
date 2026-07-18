@@ -500,39 +500,18 @@ def apply_trade_tracking(df, index_name: str, report_name: str):
             # Update existing active entry
             entry_id = entry["id"]
             entry_price = entry["entry_price"]
-            highest_price = entry["highest_price"]
-            current_trail_sl = entry["current_trail_sl"]
-            sl_price = entry["sl_price"]
-            target_price = entry["target_price"]
-            trail_sl_pct = entry["trail_sl_pct"]
             
-            # Check if new high reached
-            if price > highest_price:
-                highest_price = price
-                current_trail_sl = round(highest_price * (1 - trail_sl_pct), 2)
-                
-            # Exit evaluation (Recommended priority order)
-            status = "active"
-            exit_at = None
-            exit_price = None
-            exit_reason = None
+            # Evaluate state using shared helper
+            eval_res = _evaluate_exit(entry, price, now_str)
+            status = eval_res["status"]
+            exit_at = eval_res["exit_at"]
+            exit_price = eval_res["exit_price"]
+            exit_reason = eval_res["exit_reason"]
+            highest_price = eval_res["highest_price"]
+            current_trail_sl = eval_res["current_trail_sl"]
+            new_breach_count = eval_res["sl_breach_count"]
+            new_breach_since = eval_res["sl_breach_since"]
             
-            if price <= sl_price:
-                status = "sl_hit"
-                exit_at = now_str
-                exit_price = price
-                exit_reason = "Fixed Stop Loss hit"
-            elif price <= current_trail_sl:
-                status = "trail_sl_hit"
-                exit_at = now_str
-                exit_price = price
-                exit_reason = "Trailing Stop Loss hit"
-            elif price >= target_price:
-                status = "target_hit"
-                exit_at = now_str
-                exit_price = price
-                exit_reason = "Target price hit"
-                
             if status != "active":
                 # Close the entry in database
                 tracker_store.close_entry(
@@ -565,10 +544,12 @@ def apply_trade_tracking(df, index_name: str, report_name: str):
                     last_seen_at=now_str,
                     highest_price=highest_price,
                     current_trail_sl=current_trail_sl,
-                    report_name=report_name
+                    report_name=report_name,
+                    sl_breach_count=new_breach_count,
+                    sl_breach_since=new_breach_since
                 )
                 
-            # Append snapshot
+            # Append snapshot (taken at scan time, not on every 3-minute refresh)
             tracker_store.append_snapshot(
                 entry_id=entry_id,
                 snapshot_at=now_str,
@@ -652,6 +633,30 @@ def _run_scan_pipeline(
     if not df.empty:
         df = _annotate_first_seen(df)
         df = apply_trade_tracking(df, index_name, report_name)
+
+        # Feature 1: Compute LTP delta relative to previous scan run today
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        if "ltp" not in df.columns:
+            df["ltp"] = df["last_price"].fillna(df["close"]).fillna(0.0).round(2)
+
+        prev_ltps = {t: tracker_store.get_prev_scan_ltp(t, today_str) for t in df["ticker"]}
+        
+        def calc_change(r):
+            ticker_val = r["ticker"]
+            prev_ltp = prev_ltps.get(ticker_val)
+            if prev_ltp is not None:
+                return round(r["ltp"] - prev_ltp, 2)
+            return None
+
+        df["ltp_change_since_scan"] = df.apply(calc_change, axis=1)
+
+        # Upsert current ltp to database scan history
+        for _, r in df.iterrows():
+            try:
+                tracker_store.upsert_scan_ltp(r["ticker"], r["ltp"], today_str)
+            except Exception as e:
+                log.warning("[scan-pipeline] Failed to upsert scan ltp for %s: %s", r["ticker"], e)
+
         # Attach source metadata (P2-D)
         try:
             all_indices = list(universe_store.get_index_map().keys())
@@ -902,6 +907,106 @@ def _auto_telegram_scan() -> None:
         log.error("[auto-scan] Failed: %s", exc)
 
 
+def _auto_full_scan() -> None:
+    """
+    Rolling 30-minute auto-scan during market hours (Mon–Fri).
+    Unlike _auto_telegram_scan, this DOES update the in-memory UI cache
+    (_bg["results"]) so the frontend reflects the new scan without a manual trigger.
+    """
+    # Concurrency Guard: Check if a scan is already in flight (manual or scheduled)
+    if _bg.get("running", False):
+        log.warning("[auto-scan-30min] Skipped — another scan is currently in progress.")
+        return
+
+    now_ist = datetime.now(IST)
+    market_open  = now_ist.replace(hour=9,  minute=15, second=0, microsecond=0)
+    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    if not (market_open <= now_ist <= market_close):
+        log.info("[auto-scan-30min] Skipped — outside market hours (%s IST)", now_ist.strftime("%H:%M"))
+        return
+
+    tickers = _scheduled_scan_tickers()
+    report_name = f"screener_autoscan30_{now_ist.strftime('%Y%m%d_%H%M%S')}.csv"
+    try:
+        # Mark running to prevent concurrency and let UI know
+        _bg["running"] = True
+        _bg["progress"] = 0
+        df = _run_scan_pipeline(
+            tickers,
+            index_name="nifty500_custom",
+            report_name=report_name,
+            save_csv=True,
+            update_bg_cache=True,
+        )
+        log.info("[auto-scan-30min] Completed at %s IST — %d rows.", now_ist.strftime("%H:%M"), len(df))
+    except Exception as exc:
+        log.warning("[auto-scan-30min] Failed: %s", exc)
+        _bg["error"] = str(exc)
+    finally:
+        _bg["running"] = False
+
+
+
+# ── Shared Exit Evaluation Helper ─────────────────────────────────────────────
+
+def _evaluate_exit(entry: dict, price: float, now_str: str) -> dict:
+    """
+    Pure business logic helper to evaluate target and stop-loss breach status.
+    Returns a dict containing the updated status, breach counting state, and exit details.
+    Does NOT write to the database, append snapshots, or send alerts.
+    """
+    sl_price = entry["sl_price"]
+    target_price = entry["target_price"]
+    current_trail_sl = entry["current_trail_sl"]
+    highest_price = entry["highest_price"]
+    trail_sl_pct = entry["trail_sl_pct"]
+
+    # Update highest price and trailing SL if new high
+    if price > highest_price:
+        highest_price = price
+        current_trail_sl = round(highest_price * (1 - trail_sl_pct), 2)
+
+    status = "active"
+    exit_at = None
+    exit_price = None
+    exit_reason = None
+
+    CONFIRM_BREACHES_REQUIRED = 2
+    old_breach_count = entry.get("sl_breach_count") or 0
+    new_breach_count = old_breach_count
+    new_breach_since = entry.get("sl_breach_since")
+
+    if price <= sl_price or price <= current_trail_sl:
+        new_breach_count += 1
+        if old_breach_count == 0:
+            new_breach_since = now_str
+        if new_breach_count >= CONFIRM_BREACHES_REQUIRED:
+            status = "sl_hit" if price <= sl_price else "trail_sl_hit"
+            exit_at = now_str
+            exit_price = price
+            exit_reason = ("Fixed Stop Loss hit (confirmed)" if status == "sl_hit"
+                           else "Trailing Stop Loss hit (confirmed)")
+    elif price >= target_price:
+        status = "target_hit"
+        exit_at = now_str
+        exit_price = price
+        exit_reason = "Target price hit"
+    else:
+        new_breach_count = 0
+        new_breach_since = None
+
+    return {
+        "status": status,
+        "exit_at": exit_at,
+        "exit_price": exit_price,
+        "exit_reason": exit_reason,
+        "highest_price": highest_price,
+        "current_trail_sl": current_trail_sl,
+        "sl_breach_count": new_breach_count,
+        "sl_breach_since": new_breach_since
+    }
+
+
 # ── Live tracker price refresh ────────────────────────────────────────────────
 
 def _refresh_tracker_prices() -> None:
@@ -965,32 +1070,16 @@ def _refresh_tracker_prices() -> None:
             failed += 1
             continue
 
-        # Update highest price and trailing SL if new high
-        if price > highest_price:
-            highest_price    = price
-            current_trail_sl = round(highest_price * (1 - trail_sl_pct), 2)
-
-        # Exit evaluation (same priority order as apply_trade_tracking)
-        status     = "active"
-        exit_at    = None
-        exit_price = None
-        exit_reason = None
-
-        if price <= sl_price:
-            status      = "sl_hit"
-            exit_at     = now_str
-            exit_price  = price
-            exit_reason = "Fixed Stop Loss hit"
-        elif price <= current_trail_sl:
-            status      = "trail_sl_hit"
-            exit_at     = now_str
-            exit_price  = price
-            exit_reason = "Trailing Stop Loss hit"
-        elif price >= target_price:
-            status      = "target_hit"
-            exit_at     = now_str
-            exit_price  = price
-            exit_reason = "Target price hit"
+        # Evaluate state using shared helper
+        eval_res = _evaluate_exit(entry, price, now_str)
+        status = eval_res["status"]
+        exit_at = eval_res["exit_at"]
+        exit_price = eval_res["exit_price"]
+        exit_reason = eval_res["exit_reason"]
+        highest_price = eval_res["highest_price"]
+        current_trail_sl = eval_res["current_trail_sl"]
+        new_breach_count = eval_res["sl_breach_count"]
+        new_breach_since = eval_res["sl_breach_since"]
 
         if status != "active":
             tracker_store.close_entry(
@@ -1025,6 +1114,8 @@ def _refresh_tracker_prices() -> None:
                 highest_price=highest_price,
                 current_trail_sl=current_trail_sl,
                 report_name="ltp_refresh",
+                sl_breach_count=new_breach_count,
+                sl_breach_since=new_breach_since
             )
             updated += 1
 
@@ -1363,7 +1454,7 @@ def download_today_clean_report():
 
         df = pd.read_csv(report)
         if df.empty:
-            cols = ["ticker", "since", "score", "grd", "signal", "close", "ltp", "stop", "rsi", "atr", "filter"]
+            cols = ["ticker", "since", "score", "grd", "signal", "close", "ltp", "ltp_change_since_scan", "stop", "rsi", "atr", "filter"]
             return Response(",".join(cols) + "\r\n", mimetype="text/csv",
                             headers={"Content-Disposition": f"attachment; filename={report.stem}_clean.csv"})
 
@@ -1379,6 +1470,13 @@ def download_today_clean_report():
         clean_df["signal"] = df["signal"]
         clean_df["close"] = df["close"].fillna(0.0).round(2)
         clean_df["ltp"] = df["last_price"].fillna(df["close"]).fillna(0.0).round(2)
+        
+        # Add ltp_change_since_scan
+        if "ltp_change_since_scan" in df.columns:
+            clean_df["ltp_change_since_scan"] = df["ltp_change_since_scan"]
+        else:
+            clean_df["ltp_change_since_scan"] = None
+
         clean_df["stop"] = df["stop_loss"].fillna(0.0).round(2)
         clean_df["rsi"] = df["rsi"].fillna(0.0).round(1)
         clean_df["atr"] = df["atr"].fillna(0.0).round(2)
@@ -1409,33 +1507,13 @@ def _build_new_rows(today_only: bool = False) -> list[dict]:
 def _build_running_rows() -> list[dict]:
     """Full running-entry row shape used by the JSON API.
 
-    Show a running entry if:
-      • The stock was NOT scored in the most recent scan (e.g. a Nifty-50 scan doesn't
-        score Next-50 entries — those open positions should still be visible), OR
-      • The stock WAS scored and currently scores >= TRADE_ENTRY_MIN_SCORE (70).
-
-    Stocks that were scored in the latest scan but now score < 70 are hidden — they
-    degraded below the entry bar and should not be actively managed.
+    Returns ALL active positions from tracker_store, regardless of
+    their current re-scan score. The score gate applies only at entry time —
+    once a trade is active it must remain visible until it exits via
+    target/SL/trailing-SL.
     """
     rows = tracker_store.get_running_entries()
-    enriched = tracker_store.enrich_tracker_rows(rows)
-
-    scores = _get_latest_screener_scores()
-    if not scores:
-        # No scan data yet — show all active positions
-        return enriched
-
-    filtered = []
-    for r in enriched:
-        norm = universe_store.normalize_ticker(r.get("ticker", ""))
-        if norm not in scores:
-            # Not in latest scan — keep visible (don't lose open positions)
-            filtered.append(r)
-        elif scores[norm] >= config.TRADE_ENTRY_MIN_SCORE:
-            # In latest scan and still above entry threshold — keep
-            filtered.append(r)
-        # else: scored in latest scan but below threshold — hide (degraded)
-    return filtered
+    return tracker_store.enrich_tracker_rows(rows)
 
 
 def _build_booked_rows() -> list[dict]:
@@ -1622,13 +1700,13 @@ def api_tracker_refresh():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 NEW_CSV_COLUMNS = [
-    "ticker", "since", "score", "grd", "signal", "close", "ltp", "stop", "rsi", "atr", "filter"
+    "ticker", "since", "score", "grd", "signal", "close", "ltp", "ltp_change_since_scan", "stop", "rsi", "atr", "filter"
 ]
 
 
 def _build_new_csv_rows(today_only: bool = False) -> list[dict]:
     """
-    Returns clean new screener rows shaped for CSV export — exactly 11 columns
+    Returns clean new screener rows shaped for CSV export — exactly 12 columns
     in the order defined by NEW_CSV_COLUMNS.
     Only includes rows where total_score >= 70.
     """
@@ -1649,6 +1727,11 @@ def _build_new_csv_rows(today_only: bool = False) -> list[dict]:
         signal = r.get("signal", "")
         close = round(float(r.get("close") or 0.0), 2)
         ltp = round(float(r.get("last_price") or r.get("close") or 0.0), 2)
+        
+        # Feature 1: extract ltp_change_since_scan from memory cache
+        ltp_change = r.get("ltp_change_since_scan")
+        ltp_change_val = round(float(ltp_change), 2) if ltp_change is not None else None
+
         stop = round(float(r.get("stop_loss") or 0.0), 2)
         rsi = round(float(r.get("rsi") or 0.0), 1)
         atr = round(float(r.get("atr") or 0.0), 2)
@@ -1664,6 +1747,7 @@ def _build_new_csv_rows(today_only: bool = False) -> list[dict]:
             "signal": signal,
             "close": close,
             "ltp": ltp,
+            "ltp_change_since_scan": ltp_change_val,
             "stop": stop,
             "rsi": rsi,
             "atr": atr,
@@ -1901,6 +1985,15 @@ def _start_scheduler() -> BackgroundScheduler:
         CronTrigger(day_of_week="mon-fri", minute="*/3", timezone=IST),
         id="tracker_price_refresh",
         replace_existing=True,
+    )
+
+    # ── Rolling 30-minute auto-scan — Mon-Fri 9-15 (9:15-15:30 IST market hours) ──
+    scheduler.add_job(
+        _auto_full_scan,
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/30", timezone=IST),
+        id="auto_scan_30min",
+        replace_existing=True,
+        misfire_grace_time=300,
     )
 
     # ── EOD CSV Links Alert (Mon-Fri at TELEGRAM_EOD_HOUR:TELEGRAM_EOD_MINUTE IST) ──

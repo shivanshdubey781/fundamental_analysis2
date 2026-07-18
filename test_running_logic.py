@@ -67,17 +67,18 @@ class TestRunningTabFiltering(unittest.TestCase):
             rows = main._build_running_rows()
             tickers = [r["ticker"] for r in rows]
             
-            # QUALIFIED should be present, LOWSCORE should be filtered out
+            # Since we removed score gating on active positions (vanishing trades fix),
+            # both QUALIFIED and LOWSCORE should remain visible!
             self.assertIn("QUALIFIED", tickers)
-            self.assertNotIn("LOWSCORE", tickers)
-            self.assertEqual(len(tickers), 1)
+            self.assertIn("LOWSCORE", tickers)
+            self.assertEqual(len(tickers), 2)
 
-            # 3. Verify running.csv matches the filtered view
+            # 3. Verify running.csv matches the view
             csv_rows = main._build_running_csv_rows()
             csv_tickers = [r["ticker"] for r in csv_rows]
             self.assertIn("QUALIFIED", csv_tickers)
-            self.assertNotIn("LOWSCORE", csv_tickers)
-            self.assertEqual(len(csv_tickers), 1)
+            self.assertIn("LOWSCORE", csv_tickers)
+            self.assertEqual(len(csv_tickers), 2)
 
     def test_booked_is_not_affected_by_score_filter(self):
         """Test that booked trades are returned regardless of their score."""

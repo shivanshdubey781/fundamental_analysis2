@@ -281,6 +281,13 @@ class TestRunScanPipelineE2E(unittest.TestCase):
                 save_csv=False,
                 update_bg_cache=False,
             )
+            main._run_scan_pipeline(
+                ['BOOKTEST'],
+                index_name='nifty500_custom',
+                report_name='test_book.csv',
+                save_csv=False,
+                update_bg_cache=False,
+            )
             
         # Verify exit and alert sent
         mock_alert.assert_called_once()

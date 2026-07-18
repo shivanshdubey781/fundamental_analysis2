@@ -166,17 +166,21 @@ class TestReportExport(unittest.TestCase):
         
         try:
             report_name = "test_export.csv"
+            # First run: TGT_STOCK should close immediately, SL_STOCK should register breach but remain active
             df_enriched = main.apply_trade_tracking(df, "nifty50", report_name)
             
-            # Verify TGT_STOCK status is target_hit
             tgt = df_enriched[df_enriched["ticker"] == "TGT_STOCK"].iloc[0]
             self.assertEqual(tgt["status"], "target_hit")
             self.assertEqual(tgt["exit_price"], 1200.0)
             
-            # Verify SL_STOCK status is sl_hit
-            sl = df_enriched[df_enriched["ticker"] == "SL_STOCK"].iloc[0]
-            self.assertEqual(sl["status"], "sl_hit")
-            self.assertEqual(sl["exit_price"], 940.0)
+            sl_first = df_enriched[df_enriched["ticker"] == "SL_STOCK"].iloc[0]
+            self.assertEqual(sl_first["status"], "active")
+            
+            # Second run: SL_STOCK should now hit SL and close
+            df_enriched_second = main.apply_trade_tracking(df, "nifty50", report_name)
+            sl_second = df_enriched_second[df_enriched_second["ticker"] == "SL_STOCK"].iloc[0]
+            self.assertEqual(sl_second["status"], "sl_hit")
+            self.assertEqual(sl_second["exit_price"], 940.0)
             
         finally:
             angel_ltp.is_configured = original_configured
@@ -212,7 +216,7 @@ class TestReportExport(unittest.TestCase):
                 self.assertIn("HIGH2", tickers)
                 self.assertNotIn("LOW", tickers)
                 
-                expected_cols = ["ticker", "since", "score", "grd", "signal", "close", "ltp", "stop", "rsi", "atr", "filter"]
+                expected_cols = ["ticker", "since", "score", "grd", "signal", "close", "ltp", "ltp_change_since_scan", "stop", "rsi", "atr", "filter"]
                 self.assertListEqual(list(res_df.columns), expected_cols)
                 
                 h1 = res_df[res_df["ticker"] == "HIGH1"].iloc[0]
