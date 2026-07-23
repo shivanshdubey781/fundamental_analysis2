@@ -755,7 +755,7 @@ function switchTab(tab) {
 let _screenerData = [];
 let _sortCol      = 'total_score';
 let _sortDir      = -1;
-let _activePreset = 'balanced_daily';
+let _activePreset = 'quality_growth';
 let _screenerMode = 'new'; // 'new' | 'running' | 'booked'
 
 function _currentPreset() {
@@ -1347,7 +1347,7 @@ function renderScreenerTable() {
     return `<tr onclick="openCpFromRow(event,'${r.ticker}','${r.sector||''}','${r.transit_status||'Neutral'}','${r.ruling_planets||'Jup'}',${r.astro_score||3})" title="Click to chart · Shift+click to analyse">
       <td class="td-ticker">${r.ticker}${tradeBadge}</td>
       <td style="text-align:center">${sinceBadge}</td>
-      <td class="td-score" style="color:${scCol}">${sc}</td>
+      <td class="td-score"><span class="quality-score-badge ${sc>=70?'good':sc>=55?'warn':'bad'}">${sc}</span></td>
       <td class="td-mono">${r.grade ?? na()}</td>
       <td>${fBadge}</td>
       <td><span class="signal-pill ${sigCls}" style="padding:2px 8px;font-size:10px">\u25cf ${r.signal??'\u2014'}</span></td>

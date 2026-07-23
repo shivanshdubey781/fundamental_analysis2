@@ -13,6 +13,12 @@
   --shadow-strong: 0 24px 60px rgba(0,0,0,.6);
   --mono:   'IBM Plex Mono', monospace;
   --sans:   'IBM Plex Sans', sans-serif;
+  --badge-bg-good: rgba(0, 212, 170, 0.15);
+  --badge-border-good: rgba(0, 212, 170, 0.4);
+  --badge-bg-warn: rgba(245, 158, 11, 0.12);
+  --badge-border-warn: rgba(245, 158, 11, 0.3);
+  --badge-bg-bad: rgba(239, 68, 68, 0.15);
+  --badge-border-bad: rgba(239, 68, 68, 0.4);
 }
 [data-theme="light"] {
   --bg:     #f5f7f9; --bg2: #ffffff; --bg3: #eef2f6; --bg4: #dfe6ee;
@@ -26,6 +32,12 @@
   --table-hover: rgba(0,136,204,.05);
   --shadow-soft: 0 14px 28px rgba(15,23,42,.08);
   --shadow-strong: 0 24px 48px rgba(15,23,42,.12);
+  --badge-bg-good: rgba(0, 136, 204, 0.08);
+  --badge-border-good: rgba(0, 136, 204, 0.25);
+  --badge-bg-warn: rgba(217, 119, 6, 0.08);
+  --badge-border-warn: rgba(217, 119, 6, 0.25);
+  --badge-bg-bad: rgba(220, 38, 38, 0.08);
+  --badge-border-bad: rgba(220, 38, 38, 0.25);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; min-height: 100vh; overflow-x: hidden; transition: background .3s ease, color .3s ease; }
@@ -313,6 +325,30 @@ body::before { content: ''; position: fixed; inset: 0; background: var(--overlay
 .screener-tbl tr:hover td { background:var(--table-hover); cursor:pointer; }
 .screener-tbl .td-ticker { font-family:var(--mono); font-weight:600; color:var(--accent); letter-spacing:.06em; }
 .screener-tbl .td-score  { font-family:var(--mono); font-weight:600; }
+.quality-score-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 11px;
+  text-align: center;
+  min-width: 24px;
+}
+.quality-score-badge.good {
+  background: var(--badge-bg-good);
+  color: var(--accent);
+  border: 1px solid var(--badge-border-good);
+}
+.quality-score-badge.warn {
+  background: var(--badge-bg-warn);
+  color: var(--warn);
+  border: 1px solid var(--badge-border-warn);
+}
+.quality-score-badge.bad {
+  background: var(--badge-bg-bad);
+  color: var(--red);
+  border: 1px solid var(--badge-border-bad);
+}
 .screener-tbl .td-mono   { font-family:var(--mono); font-size:11px; color:var(--text2); }
 .screener-tbl .td-reason { max-width:320px; white-space:normal; }
 .screener-empty { text-align:center; padding:40px; font-family:var(--mono); font-size:11px; color:var(--text3); letter-spacing:.1em; }
